@@ -15,7 +15,8 @@ from supabase import create_client
 SUPABASE_URL      = os.environ['SUPABASE_URL']
 SUPABASE_KEY      = os.environ['SUPABASE_KEY']
 IG_USERNAME       = os.environ['IG_USERNAME']
-IG_PASSWORD       = os.environ['IG_PASSWORD']
+IG_PASSWORD       = os.environ.get('IG_PASSWORD', '')
+IG_SESSION_ID     = os.environ.get('IG_SESSION_ID', '')
 
 MAX_DMS_PER_RUN   = 15
 MAX_DMS_PER_DAY   = 40
@@ -56,6 +57,18 @@ def increment_dm_count(ig_user_id: str):
 
 # ─── Login ────────────────────────────────────────────────────────────────────
 def login():
+    # Priorité : session cookie (évite le blocage IP)
+    if IG_SESSION_ID:
+        log.info("Connexion via session cookie...")
+        from urllib.parse import unquote
+        session_id = unquote(IG_SESSION_ID)
+        cl.set_locale('fr_FR')
+        cl.set_timezone_offset(3600)
+        cl.login_by_sessionid(session_id)
+        log.info(f"Connecté via sessionid.")
+        return
+
+    # Fallback : session sauvegardée dans Supabase
     session = load_session()
     if session:
         log.info("Chargement session existante...")
@@ -68,7 +81,7 @@ def login():
         except Exception as e:
             log.warning(f"Session invalide, reconnexion : {e}")
 
-    log.info("Première connexion...")
+    log.info("Connexion par mot de passe...")
     cl.set_locale('fr_FR')
     cl.set_timezone_offset(3600)
     cl.login(IG_USERNAME, IG_PASSWORD)

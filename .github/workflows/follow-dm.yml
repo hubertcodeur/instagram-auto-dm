@@ -24,8 +24,8 @@ jobs:
 
       - name: Run poll
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          IG_USERNAME:  ${{ secrets.IG_USERNAME }}
-          IG_PASSWORD:  ${{ secrets.IG_PASSWORD }}
+          SUPABASE_URL:   ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:   ${{ secrets.SUPABASE_KEY }}
+          IG_USERNAME:    ${{ secrets.IG_USERNAME }}
+          IG_SESSION_ID:  ${{ secrets.IG_SESSION_ID }}
         run: python follow-dm-service/main.py
