@@ -30,7 +30,7 @@ cl = Client()
 
 # ─── Session persistée dans Supabase ─────────────────────────────────────────
 def load_session() -> dict | None:
-    row = supabase.table('ig_accounts').select('session_data').eq('ig_username', IG_USERNAME).maybeSingle().execute()
+    row = supabase.table('ig_accounts').select('session_data').eq('ig_username', IG_USERNAME).maybe_single().execute()
     if row.data and row.data.get('session_data'):
         return row.data['session_data']
     return None
