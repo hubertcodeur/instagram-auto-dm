@@ -45,8 +45,8 @@ export async function POST(req: NextRequest) {
     return new NextResponse('Invalid JSON', { status: 400 })
   }
 
-  // Répondre 200 immédiatement (Meta exige < 20s)
-  processEvent(body).catch(console.error)
+  // Traiter de façon synchrone (Vercel coupe la fonction après le return)
+  await processEvent(body)
   return new NextResponse('EVENT_RECEIVED', { status: 200 })
 }
 
