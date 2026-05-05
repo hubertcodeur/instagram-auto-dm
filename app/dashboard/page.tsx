@@ -25,58 +25,60 @@ function DashboardContent() {
   const [keyword, setKeyword] = useState('')
   const [message, setMessage] = useState('')
   const [loading, setLoading] = useState(false)
+  const [fetching, setFetching] = useState(true)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    const saved = localStorage.getItem('ig_account')
-    if (saved) {
-      const acc = JSON.parse(saved)
-      setAccount(acc)
-      fetchRules(acc.ig_user_id)
-    }
+    fetch('/api/auth/me')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.ig_user_id) {
+          setAccount(data)
+          fetchRules(data.ig_user_id)
+        }
+      })
+      .catch(console.error)
+      .finally(() => setFetching(false))
   }, [])
 
-  // Stocker le compte après connexion
-  useEffect(() => {
-    if (connected) {
-      fetch('/api/auth/me')
-        .then(r => r.json())
-        .then(data => {
-          if (data.ig_user_id) {
-            localStorage.setItem('ig_account', JSON.stringify(data))
-            setAccount(data)
-            fetchRules(data.ig_user_id)
-          }
-        })
-    }
-  }, [connected])
-
   async function fetchRules(igUserId: string) {
-    const res = await fetch(`/api/rules?ig_user_id=${igUserId}`)
-    const data = await res.json()
-    setRules(data || [])
+    try {
+      const res = await fetch(`/api/rules?ig_user_id=${igUserId}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      setRules(Array.isArray(data) ? data : [])
+    } catch (err) {
+      console.error('Failed to fetch rules:', err)
+      setRules([])
+    }
   }
 
   async function addRule() {
     if (!keyword.trim() || !message.trim() || !account) return
     setLoading(true)
     setError('')
-    const res = await fetch('/api/rules', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ig_user_id: account.ig_user_id,
-        keyword,
-        dm_message: message,
-      }),
-    })
-    const data = await res.json()
-    if (data.error) {
-      setError(data.error.message || 'Erreur')
-    } else {
-      setRules(prev => [data, ...prev])
-      setKeyword('')
-      setMessage('')
+    try {
+      const res = await fetch('/api/rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ig_user_id: account.ig_user_id,
+          keyword,
+          dm_message: message,
+        }),
+      })
+      const data = await res.json()
+      if (data.error) {
+        const msg = data.error.message || ''
+        if (msg.includes('unique')) setError('Ce mot-clé existe déjà.')
+        else setError('Erreur lors de l\'ajout. Réessaie.')
+      } else {
+        setRules(prev => [data, ...prev])
+        setKeyword('')
+        setMessage('')
+      }
+    } catch {
+      setError('Erreur réseau. Réessaie.')
     }
     setLoading(false)
   }
@@ -84,6 +86,14 @@ function DashboardContent() {
   async function deleteRule(id: string) {
     await fetch(`/api/rules?id=${id}`, { method: 'DELETE' })
     setRules(prev => prev.filter(r => r.id !== id))
+  }
+
+  if (fetching) {
+    return (
+      <main className="min-h-screen flex items-center justify-center">
+        <p className="text-gray-400">Chargement...</p>
+      </main>
+    )
   }
 
   if (!account) {
@@ -107,7 +117,7 @@ function DashboardContent() {
         )}
 
         <div className="bg-white rounded-2xl shadow p-6 mb-6">
-          <div className="flex items-center gap-3 mb-1">
+          <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-400 rounded-full flex items-center justify-center text-white font-bold">
               {account.ig_username?.[0]?.toUpperCase()}
             </div>
@@ -131,16 +141,17 @@ function DashboardContent() {
             />
           </div>
 
-          <div className="mb-4">
+          <div className="mb-1">
             <label className="text-sm text-gray-500 mb-1 block">Message DM automatique</label>
             <textarea
               value={message}
-              onChange={e => setMessage(e.target.value)}
+              onChange={e => setMessage(e.target.value.slice(0, 2000))}
               placeholder="ex: Salut ! Voici le lien que tu cherchais : ..."
               rows={3}
               className="w-full border border-gray-200 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300 resize-none"
             />
           </div>
+          <p className="text-xs text-gray-400 mb-4 text-right">{message.length}/2000</p>
 
           {error && <p className="text-red-500 text-sm mb-3">{error}</p>}
 
@@ -169,7 +180,7 @@ function DashboardContent() {
                   </div>
                   <button
                     onClick={() => deleteRule(rule.id)}
-                    className="text-gray-300 hover:text-red-400 transition text-lg leading-none mt-0.5"
+                    className="text-gray-300 hover:text-red-400 transition text-lg leading-none mt-0.5 flex-shrink-0"
                   >
                     ×
                   </button>

@@ -1,3 +1,5 @@
+import { createHmac, timingSafeEqual } from 'crypto'
+
 const GRAPH_API = 'https://graph.instagram.com/v21.0'
 
 export async function sendDM(recipientId: string, message: string, accessToken: string) {
@@ -22,7 +24,11 @@ export async function refreshLongLivedToken(token: string): Promise<{ access_tok
     `${GRAPH_API}/refresh_access_token?grant_type=ig_refresh_token&access_token=${token}`
   )
   if (!res.ok) throw new Error('Token refresh failed')
-  return res.json()
+  const data = await res.json()
+  if (!data.access_token || typeof data.expires_in !== 'number' || data.expires_in <= 0) {
+    throw new Error(`Invalid token response: ${JSON.stringify(data)}`)
+  }
+  return data
 }
 
 export async function getIGUserInfo(accessToken: string) {
@@ -32,10 +38,15 @@ export async function getIGUserInfo(accessToken: string) {
 }
 
 export function verifyWebhookSignature(payload: string, signature: string): boolean {
-  const crypto = require('crypto')
-  const expected = crypto
-    .createHmac('sha256', process.env.META_APP_SECRET!)
-    .update(payload)
-    .digest('hex')
-  return `sha256=${expected}` === signature
+  const secret = process.env.META_APP_SECRET
+  if (!secret) {
+    console.error('META_APP_SECRET not configured')
+    return false
+  }
+  const expected = `sha256=${createHmac('sha256', secret).update(payload).digest('hex')}`
+  try {
+    return timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
+  } catch {
+    return false
+  }
 }
