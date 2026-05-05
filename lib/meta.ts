@@ -37,6 +37,24 @@ export async function getIGUserInfo(accessToken: string) {
   return res.json()
 }
 
+export async function getFollowers(
+  accessToken: string,
+  after?: string
+): Promise<{ data: Array<{ id: string }>; paging?: { cursors?: { after: string }; next?: string } }> {
+  const params = new URLSearchParams({
+    fields: 'id',
+    limit: '50',
+    access_token: accessToken,
+  })
+  if (after) params.set('after', after)
+  const res = await fetch(`${GRAPH_API}/me/followers?${params}`)
+  if (!res.ok) {
+    const err = await res.json()
+    throw new Error(`Meta API followers error: ${JSON.stringify(err)}`)
+  }
+  return res.json()
+}
+
 export function verifyWebhookSignature(payload: string, signature: string): boolean {
   const secret = process.env.META_APP_SECRET
   if (!secret) {

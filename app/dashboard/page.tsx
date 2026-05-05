@@ -11,6 +11,13 @@ type Rule = {
   is_active: boolean
 }
 
+type FollowRule = {
+  ig_user_id: string
+  dm_message: string
+  is_active: boolean
+  initialized: boolean
+} | null
+
 type Account = {
   ig_user_id: string
   ig_username: string
@@ -27,6 +34,10 @@ function DashboardContent() {
   const [loading, setLoading] = useState(false)
   const [fetching, setFetching] = useState(true)
   const [error, setError] = useState('')
+  const [followRule, setFollowRule] = useState<FollowRule>(null)
+  const [followMessage, setFollowMessage] = useState('')
+  const [followLoading, setFollowLoading] = useState(false)
+  const [followError, setFollowError] = useState('')
 
   useEffect(() => {
     fetch('/api/auth/me')
@@ -35,6 +46,7 @@ function DashboardContent() {
         if (data?.ig_user_id) {
           setAccount(data)
           fetchRules(data.ig_user_id)
+          fetchFollowRule(data.ig_user_id)
         }
       })
       .catch(console.error)
@@ -51,6 +63,43 @@ function DashboardContent() {
       console.error('Failed to fetch rules:', err)
       setRules([])
     }
+  }
+
+  async function fetchFollowRule(igUserId: string) {
+    try {
+      const res = await fetch(`/api/follow-rules?ig_user_id=${igUserId}`)
+      const data = await res.json()
+      setFollowRule(data)
+      if (data?.dm_message) setFollowMessage(data.dm_message)
+    } catch {
+      setFollowRule(null)
+    }
+  }
+
+  async function saveFollowRule() {
+    if (!followMessage.trim() || !account) return
+    setFollowLoading(true)
+    setFollowError('')
+    try {
+      const res = await fetch('/api/follow-rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ig_user_id: account.ig_user_id, dm_message: followMessage }),
+      })
+      const data = await res.json()
+      if (data.error) setFollowError('Erreur lors de la sauvegarde.')
+      else setFollowRule(data)
+    } catch {
+      setFollowError('Erreur réseau.')
+    }
+    setFollowLoading(false)
+  }
+
+  async function deleteFollowRule() {
+    if (!account) return
+    await fetch(`/api/follow-rules?ig_user_id=${account.ig_user_id}`, { method: 'DELETE' })
+    setFollowRule(null)
+    setFollowMessage('')
   }
 
   async function addRule() {
@@ -162,6 +211,47 @@ function DashboardContent() {
           >
             {loading ? 'Ajout...' : 'Ajouter la règle'}
           </button>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow p-6 mb-6">
+          <h2 className="font-bold text-gray-800 mb-1">DM automatique aux nouveaux followers</h2>
+          <p className="text-xs text-gray-400 mb-4">Polling toutes les 2h · nécessite instagram_business_manage_insights</p>
+
+          {followRule?.is_active ? (
+            <div className="space-y-3">
+              <div className="bg-blue-50 rounded-xl p-3">
+                <p className="text-xs text-blue-500 font-medium mb-1">
+                  {followRule.initialized ? '● Actif' : '⏳ Initialisation en cours (premier poll)'}
+                </p>
+                <p className="text-sm text-gray-700">{followRule.dm_message}</p>
+              </div>
+              <button
+                onClick={deleteFollowRule}
+                className="text-sm text-red-400 hover:text-red-600 transition"
+              >
+                Désactiver
+              </button>
+            </div>
+          ) : (
+            <div>
+              <textarea
+                value={followMessage}
+                onChange={e => setFollowMessage(e.target.value.slice(0, 2000))}
+                placeholder="ex: Merci de me suivre ! Voici mon guide gratuit : ..."
+                rows={3}
+                className="w-full border border-gray-200 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 resize-none mb-1"
+              />
+              <p className="text-xs text-gray-400 mb-3 text-right">{followMessage.length}/2000</p>
+              {followError && <p className="text-red-500 text-sm mb-2">{followError}</p>}
+              <button
+                onClick={saveFollowRule}
+                disabled={followLoading || !followMessage.trim()}
+                className="w-full bg-gradient-to-r from-blue-500 to-indigo-500 text-white font-semibold py-2 rounded-xl hover:opacity-90 disabled:opacity-40 transition"
+              >
+                {followLoading ? 'Sauvegarde...' : 'Activer le DM de bienvenue'}
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="bg-white rounded-2xl shadow p-6">

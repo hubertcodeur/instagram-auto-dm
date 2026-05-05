@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/refresh-tokens",
       "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/cron/follow-dm",
+      "schedule": "0 */2 * * *"
     }
   ]
 }

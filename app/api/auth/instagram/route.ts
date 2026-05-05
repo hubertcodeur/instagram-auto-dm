@@ -7,7 +7,7 @@ export async function GET(req: NextRequest) {
   const params = new URLSearchParams({
     client_id: process.env.META_APP_ID!,
     redirect_uri: `${process.env.NEXT_PUBLIC_BASE_URL}/api/auth/callback`,
-    scope: 'instagram_business_basic,instagram_business_manage_messages',
+    scope: 'instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_insights',
     response_type: 'code',
     state,
   })
