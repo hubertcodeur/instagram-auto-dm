@@ -14,11 +14,13 @@ IG_PROXY      = "http://kyrqpksw-fr-4:swonu50mkyce@p.webshare.io:80"
 IG_USER_PK    = "77135226942"
 NTFY_TOPIC    = os.environ.get('NTFY_TOPIC', '')
 
-DM_START_HOUR       = 7
-DM_END_HOUR         = 23
+MAX_DMS_PER_DAY      = 120
+DM_START_HOUR        = 7
+DM_END_HOUR          = 23
 SESSION_RENEWAL_DAYS = 30
-VIP_THRESHOLD       = 5000
-PARIS_TZ            = pytz.timezone('Europe/Paris')
+VIP_THRESHOLD        = 5000
+PARIS_TZ             = pytz.timezone('Europe/Paris')
+CSRF_FALLBACK        = "Rp0UvLbRuIGCOpqx4loSNfPiO0P0ZECm"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', datefmt='%H:%M:%S')
 log = logging.getLogger(__name__)
@@ -100,7 +102,6 @@ def relogin() -> str:
 
 def make_ig_session(session_id: Optional[str] = None) -> Optional[requests.Session]:
     if session_id is None:
-        # Rotation automatique si >30 jours
         if should_renew_session():
             log.info("Rotation sessionid (30j ecoules)...")
             try:
@@ -121,11 +122,13 @@ def make_ig_session(session_id: Optional[str] = None) -> Optional[requests.Sessi
         r = s.get("https://i.instagram.com/api/v1/accounts/current_user/?edit=true", timeout=10)
         if r.status_code in (401, 403):
             return None
-        csrf = s.cookies.get("csrftoken", domain=".instagram.com") or "missing"
+        # FIX 1: fallback CSRF si cookie absent
+        csrf = s.cookies.get("csrftoken", domain=".instagram.com") or CSRF_FALLBACK
         s.headers.update({"X-CSRFToken": csrf})
         log.info(f"Session OK. CSRF: {csrf[:10]}...")
     except Exception as e:
         log.warning(f"CSRF fetch failed: {e}")
+        s.headers.update({"X-CSRFToken": CSRF_FALLBACK})
     return s
 
 # ── Instagram API ─────────────────────────────────────────────────────────────
@@ -211,7 +214,6 @@ def has_reply_in_thread(ig_session: requests.Session, thread_id: str) -> bool:
         r = ig_session.get(f"https://i.instagram.com/api/v1/direct_v2/threads/{thread_id}/", timeout=10)
         if r.status_code == 200:
             items = r.json().get('thread', {}).get('items', [])
-            # Si plus d'1 message dans le thread → quelqu'un a répondu
             return len(items) > 1
     except Exception:
         pass
@@ -260,9 +262,8 @@ def poll_followers():
             notify("Bot Instagram ARRETE", msg, "urgent")
             raise RuntimeError(msg)
 
-    # Shadowban check
     if check_shadowban(ig_session):
-        notify("⚠️ Shadowban detecte", "Verifier ton compte Instagram — restrictions detectees.", "high")
+        notify("Shadowban detecte", "Verifier ton compte Instagram — restrictions detectees.", "high")
 
     inbox_followers = get_new_followers_from_inbox(ig_session)
     if inbox_followers is None:
@@ -276,7 +277,8 @@ def poll_followers():
         urgent      = get_urgent_mode(ig_user_id)
         max_per_run = 15 if urgent else 8
 
-        if get_dm_count(ig_user_id) >= rule.get('dm_count_today_max', 120):
+        # FIX 2: utiliser MAX_DMS_PER_DAY constant
+        if get_dm_count(ig_user_id) >= MAX_DMS_PER_DAY:
             log.info("Limite journaliere atteinte.")
             continue
 
@@ -309,21 +311,18 @@ def _process_account(ig_session, ig_user_id, rule, initialized, inbox_followers,
         return
 
     log.info(f"{len(new_followers)} nouveau(x) + {len(pending)} en attente")
-    remaining = 120 - get_dm_count(ig_user_id)
+    remaining = MAX_DMS_PER_DAY - get_dm_count(ig_user_id)
     batch     = to_dm[:min(max_per_run, remaining)]
 
     for follower_id in batch:
-        # Infos profil
-        user_info = get_user_info(ig_session, follower_id)
+        user_info      = get_user_info(ig_session, follower_id)
         follower_count = user_info.get('follower_count', 0)
-        prenom = extract_prenom(user_info)
+        prenom         = extract_prenom(user_info)
 
-        # Alerte VIP
-        if follower_count >= 5000:
-            notify(f"🌟 Abonne VIP : {user_info.get('username', follower_id)}",
+        if follower_count >= VIP_THRESHOLD:
+            notify(f"Abonne VIP : {user_info.get('username', follower_id)}",
                    f"{user_info.get('username')} ({follower_count} followers) vient de s'abonner !", "high")
 
-        # Message avec prénom + UTM
         msg_raw, msg_idx = pick_message(rule)
         message = inject_prenom(add_utm(msg_raw, msg_idx), prenom)
 
@@ -343,14 +342,20 @@ def _process_account(ig_session, ig_user_id, rule, initialized, inbox_followers,
 
         time.sleep(random.uniform(30, 90))
 
-    for fid in new_followers[len([f for f in batch if f in new_followers]):]:
-        supabase.table('known_followers').upsert(
-            {'ig_user_id': ig_user_id, 'follower_id': fid, 'dm_sent': False},
-            on_conflict='ig_user_id,follower_id'
-        ).execute()
+    new_in_batch = set(f for f in batch if f in set(new_followers))
+    for fid in new_followers:
+        if fid not in new_in_batch:
+            supabase.table('known_followers').upsert(
+                {'ig_user_id': ig_user_id, 'follower_id': fid, 'dm_sent': False},
+                on_conflict='ig_user_id,follower_id'
+            ).execute()
 
 def _process_followups(ig_session, ig_user_id, rule):
     """Envoie un message de relance 24h apres si pas de reponse."""
+    # Pas de relance si limite journaliere atteinte
+    if get_dm_count(ig_user_id) >= MAX_DMS_PER_DAY:
+        return
+
     followup_msg = pick_followup_message(rule)
     if not followup_msg:
         return
@@ -371,6 +376,9 @@ def _process_followups(ig_session, ig_user_id, rule):
 
     log.info(f"{len(rows)} relances a envoyer...")
     for row in rows:
+        if get_dm_count(ig_user_id) >= MAX_DMS_PER_DAY:
+            break
+
         follower_id = row['follower_id']
         thread_id   = row['thread_id']
 
@@ -384,7 +392,10 @@ def _process_followups(ig_session, ig_user_id, rule):
         prenom    = extract_prenom(user_info)
         message   = inject_prenom(followup_msg, prenom)
 
+        # FIX 3: compter les relances dans la limite journaliere
         sent, _ = send_dm(ig_session, follower_id, message)
+        if sent:
+            increment_dm_count(ig_user_id)
         supabase.table('known_followers').update({'follow_up_sent': True})\
             .eq('ig_user_id', ig_user_id).eq('follower_id', follower_id).execute()
         log.info(f"Relance {'OK' if sent else 'KO'} -> {follower_id}")
