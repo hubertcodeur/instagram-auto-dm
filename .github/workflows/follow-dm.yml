@@ -2,8 +2,8 @@ name: Follow DM
 
 on:
   schedule:
-    - cron: '0 * * * *'   # toutes les heures
-  workflow_dispatch:        # lancement manuel possible
+    - cron: '0 * * * *'
+  workflow_dispatch:
 
 jobs:
   poll:
@@ -28,4 +28,5 @@ jobs:
           SUPABASE_KEY:   ${{ secrets.SUPABASE_KEY }}
           IG_USERNAME:    ${{ secrets.IG_USERNAME }}
           IG_SESSION_ID:  ${{ secrets.IG_SESSION_ID }}
+          IG_PASSWORD:    ${{ secrets.IG_PASSWORD }}
         run: python follow-dm-service/main.py
