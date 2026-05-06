@@ -1,5 +1,5 @@
 from typing import Optional
-import os, time, random, re, logging, requests, uuid, json
+import os, sys, time, random, re, logging, requests, uuid, json
 from datetime import date
 from urllib.parse import unquote
 from supabase import create_client
@@ -34,9 +34,13 @@ def make_ig_session():
     s.cookies.set("sessionid", session_id, domain=".instagram.com")
     try:
         r = s.get("https://i.instagram.com/api/v1/accounts/current_user/?edit=true", timeout=10)
+        if r.status_code in (401, 403):
+            raise RuntimeError(f"SESSION INSTAGRAM EXPIREE (HTTP {r.status_code}) — renouveler le sessionid dans les secrets GitHub")
         csrf = s.cookies.get("csrftoken", domain=".instagram.com") or "missing"
         s.headers.update({"X-CSRFToken": csrf})
         log.info(f"CSRF: {csrf[:10]}...")
+    except RuntimeError:
+        raise
     except Exception as e:
         log.warning(f"CSRF fetch failed: {e}")
         s.headers.update({"X-CSRFToken": "Rp0UvLbRuIGCOpqx4loSNfPiO0P0ZECm"})
@@ -63,6 +67,8 @@ def get_followers(user_pk: str, ig_session: requests.Session, amount: int = 200)
     while len(users) < amount:
         url = f"https://i.instagram.com/api/v1/friendships/{user_pk}/followers/?count=50&max_id={max_id}"
         r = ig_session.get(url, timeout=15)
+        if r.status_code in (401, 403):
+            raise RuntimeError(f"SESSION INSTAGRAM EXPIREE sur /followers (HTTP {r.status_code}) — renouveler le sessionid dans les secrets GitHub")
         if r.status_code != 200:
             log.warning(f"Followers {r.status_code}: {r.text[:100]}")
             break
@@ -125,6 +131,8 @@ def poll_followers():
 
         try:
             _process_account(ig_session, ig_user_id, rule, initialized)
+        except RuntimeError:
+            raise
         except Exception as e:
             log.error(f"Erreur : {e}", exc_info=True)
 
