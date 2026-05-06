@@ -74,7 +74,6 @@ def relogin() -> str:
         },
         timeout=20,
     )
-    log.info(f"Login HTTP {r.status_code}: {r.text[:100]}")
     new_session = s.cookies.get("sessionid")
     if not new_session:
         raise RuntimeError("Reconnexion echouee — captcha ou challenge requis")
@@ -105,6 +104,27 @@ def make_ig_session(session_id: Optional[str] = None) -> Optional[requests.Sessi
         s.headers.update({"X-CSRFToken": "Rp0UvLbRuIGCOpqx4loSNfPiO0P0ZECm"})
     return s
 
+def get_new_followers_from_inbox(ig_session: requests.Session) -> Optional[list]:
+    """1 seul appel API — lit les notifications de nouveaux abonnes (type 3)."""
+    r = ig_session.get("https://i.instagram.com/api/v1/news/inbox/", timeout=15)
+    if r.status_code in (401, 403):
+        return None
+    if r.status_code != 200:
+        log.warning(f"Inbox {r.status_code}: {r.text[:100]}")
+        return []
+    data = r.json()
+    stories = data.get("new_stories", []) + data.get("old_stories", [])
+    seen = set()
+    followers = []
+    for item in stories:
+        if item.get("type") == 3:  # 3 = nouvel abonne
+            pid = str(item.get("args", {}).get("profile_id", ""))
+            if pid and pid not in seen:
+                seen.add(pid)
+                followers.append(pid)
+    log.info(f"Inbox: {len(followers)} abonnes detectes")
+    return followers
+
 def get_dm_count(ig_user_id: str) -> int:
     row = supabase.table('follow_dm_rules').select('dm_count_today, dm_count_date').eq('ig_user_id', ig_user_id).maybe_single().execute()
     if not row.data:
@@ -119,26 +139,6 @@ def increment_dm_count(ig_user_id: str):
         'dm_count_today': count,
         'dm_count_date': str(date.today()),
     }).eq('ig_user_id', ig_user_id).execute()
-
-def get_followers(user_pk: str, ig_session: requests.Session, amount: int = 200):
-    users = []
-    max_id = ""
-    while len(users) < amount:
-        url = f"https://i.instagram.com/api/v1/friendships/{user_pk}/followers/?count=50&max_id={max_id}"
-        r = ig_session.get(url, timeout=15)
-        if r.status_code in (401, 403):
-            return None
-        if r.status_code != 200:
-            log.warning(f"Followers {r.status_code}: {r.text[:100]}")
-            break
-        data = r.json()
-        batch = data.get("users", [])
-        users.extend([str(u["pk"]) for u in batch])
-        max_id = data.get("next_max_id", "")
-        if not max_id or not batch:
-            break
-        time.sleep(random.uniform(1, 2))
-    return users
 
 def send_dm(ig_session: requests.Session, follower_id: str, message: str) -> bool:
     urls = re.findall(r"https?://[^\s]+", message)
@@ -190,12 +190,19 @@ def poll_followers():
             new_sid = relogin()
             ig_session = make_ig_session(new_sid)
         except RuntimeError as e:
-            notify("🔴 Bot Instagram ARRETE", str(e), "urgent")
+            notify("Bot Instagram ARRETE", str(e), "urgent")
             raise
         if ig_session is None:
-            msg = "SESSION INVALIDE meme apres reconnexion — intervention manuelle requise"
-            notify("🔴 Bot Instagram ARRETE", msg, "urgent")
+            msg = "SESSION INVALIDE meme apres reconnexion"
+            notify("Bot Instagram ARRETE", msg, "urgent")
             raise RuntimeError(msg)
+
+    # Lecture inbox — 1 seul appel API
+    inbox_followers = get_new_followers_from_inbox(ig_session)
+    if inbox_followers is None:
+        msg = "SESSION EXPIREE sur /news/inbox"
+        notify("Bot Instagram ARRETE", msg, "urgent")
+        raise RuntimeError(msg)
 
     for rule in rules:
         ig_user_id  = rule['ig_user_id']
@@ -206,47 +213,36 @@ def poll_followers():
             continue
 
         try:
-            _process_account(ig_session, ig_user_id, rule, initialized)
+            _process_account(ig_session, ig_user_id, rule, initialized, inbox_followers)
         except RuntimeError:
             raise
         except Exception as e:
             log.error(f"Erreur : {e}", exc_info=True)
 
-def _process_account(ig_session: requests.Session, ig_user_id: str, rule: dict, initialized: bool):
-    log.info("Fetch followers...")
-    time.sleep(random.uniform(2, 4))
-
-    current_ids = get_followers(IG_USER_PK, ig_session, amount=200)
-    if current_ids is None:
-        msg = "SESSION EXPIREE sur /followers — intervention requise"
-        notify("🔴 Bot Instagram ARRETE", msg, "urgent")
-        raise RuntimeError(msg)
-
-    log.info(f"  {len(current_ids)} followers recents")
-
+def _process_account(ig_session: requests.Session, ig_user_id: str, rule: dict, initialized: bool, inbox_followers: list):
     known_rows = supabase.table('known_followers').select('follower_id, dm_sent').eq('ig_user_id', ig_user_id).execute().data
     known_map = {row['follower_id']: row['dm_sent'] for row in known_rows}
 
     if not initialized:
-        log.info(f"  Init silencieuse ({len(current_ids)} followers)...")
-        rows = [{'ig_user_id': ig_user_id, 'follower_id': fid, 'dm_sent': True} for fid in current_ids]
+        log.info(f"Init silencieuse ({len(inbox_followers)} followers inbox)...")
+        rows = [{'ig_user_id': ig_user_id, 'follower_id': fid, 'dm_sent': True} for fid in inbox_followers]
         for i in range(0, len(rows), 500):
             supabase.table('known_followers').upsert(rows[i:i+500], on_conflict='ig_user_id,follower_id').execute()
         supabase.table('follow_dm_rules').update({'initialized': True}).eq('ig_user_id', ig_user_id).execute()
-        log.info("  Init terminee.")
+        log.info("Init terminee.")
         return
 
-    # Nouveaux followers (pas encore en base)
-    new_followers = [fid for fid in current_ids if fid not in known_map]
-    # File d'attente : followers connus mais DM non envoye
-    pending = [fid for fid in current_ids if known_map.get(fid) is False]
+    # Nouveaux : pas encore en base
+    new_followers = [fid for fid in inbox_followers if fid not in known_map]
+    # File d'attente : connus mais DM non envoye
+    pending = [fid for fid in inbox_followers if known_map.get(fid) is False]
 
     to_dm = new_followers + pending
     if not to_dm:
-        log.info("  Aucun nouveau follower ni file d'attente.")
+        log.info("Aucun nouveau follower.")
         return
 
-    log.info(f"  {len(new_followers)} nouveau(x) + {len(pending)} en attente")
+    log.info(f"{len(new_followers)} nouveau(x) + {len(pending)} en attente")
     remaining = MAX_DMS_PER_DAY - get_dm_count(ig_user_id)
     batch = to_dm[:min(MAX_DMS_PER_RUN, remaining)]
 
@@ -255,21 +251,19 @@ def _process_account(ig_session: requests.Session, ig_user_id: str, rule: dict, 
         dm_sent = send_dm(ig_session, follower_id, message)
         if dm_sent:
             increment_dm_count(ig_user_id)
-            log.info(f"  DM OK -> {follower_id}")
+            log.info(f"DM OK -> {follower_id}")
         else:
-            log.error(f"  DM echoue -> {follower_id}")
-        # Upsert pour les nouveaux + update pour les pending
+            log.error(f"DM echoue -> {follower_id}")
         supabase.table('known_followers').upsert(
             {'ig_user_id': ig_user_id, 'follower_id': follower_id, 'dm_sent': dm_sent},
             on_conflict='ig_user_id,follower_id'
         ).execute()
         time.sleep(random.uniform(DM_DELAY_MIN, DM_DELAY_MAX))
 
-    # Enregistrer les nouveaux non traites en file d'attente
-    leftover_new = new_followers[len([f for f in batch if f in new_followers]):]
-    for fid in leftover_new:
-        supabase.table('known_followers').insert(
-            {'ig_user_id': ig_user_id, 'follower_id': fid, 'dm_sent': False}
+    for fid in new_followers[len([f for f in batch if f in new_followers]):]:
+        supabase.table('known_followers').upsert(
+            {'ig_user_id': ig_user_id, 'follower_id': fid, 'dm_sent': False},
+            on_conflict='ig_user_id,follower_id'
         ).execute()
 
 if __name__ == '__main__':
