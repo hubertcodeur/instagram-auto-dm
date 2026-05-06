@@ -1,0 +1,20 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: '0 12 1 * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep workflows active
+        run: echo "keep-alive $(date)"
+      - name: Commit keepalive
+        run: |
+          git config user.email "bot@arabeprogress.app"
+          git config user.name "igbot"
+          git commit --allow-empty -m "chore: keep-alive $(date +%Y-%m)"
+          git push
