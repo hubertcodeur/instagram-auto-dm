@@ -8,6 +8,7 @@ SUPABASE_URL  = os.environ['SUPABASE_URL']
 SUPABASE_KEY  = os.environ['SUPABASE_KEY']
 IG_USERNAME   = os.environ['IG_USERNAME']
 IG_SESSION_ID = os.environ.get('IG_SESSION_ID', '')
+IG_PASSWORD   = os.environ.get('IG_PASSWORD', '')
 IG_PROXY      = "http://kyrqpksw-fr-4:swonu50mkyce@p.webshare.io:80"
 IG_USER_PK    = "77135226942"
 
@@ -21,8 +22,57 @@ log = logging.getLogger(__name__)
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def make_ig_session():
-    session_id = unquote(IG_SESSION_ID)
+def get_stored_session_id() -> str:
+    row = supabase.table('ig_accounts').select('session_id').eq('ig_username', IG_USERNAME).maybe_single().execute()
+    if row.data and row.data.get('session_id'):
+        return row.data['session_id']
+    return unquote(IG_SESSION_ID)
+
+def save_session_id(session_id: str):
+    supabase.table('ig_accounts').upsert(
+        {'ig_username': IG_USERNAME, 'session_id': session_id},
+        on_conflict='ig_username'
+    ).execute()
+    log.info("Nouveau sessionid sauvegarde en base.")
+
+def relogin() -> str:
+    if not IG_PASSWORD:
+        raise RuntimeError("SESSION INSTAGRAM EXPIREE et IG_PASSWORD non defini — intervention manuelle requise")
+    log.info("Tentative reconnexion avec mot de passe...")
+    s = requests.Session()
+    s.proxies = {"http": IG_PROXY, "https": IG_PROXY}
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram/303.0.0.11.109",
+        "Accept": "*/*",
+        "Accept-Language": "fr-FR,fr;q=0.9",
+        "X-IG-App-ID": "936619743392459",
+    })
+    # Get CSRF
+    r = s.get("https://www.instagram.com/", timeout=15)
+    csrf = s.cookies.get("csrftoken") or ""
+    s.headers.update({"X-CSRFToken": csrf, "Referer": "https://www.instagram.com/"})
+    # Login
+    ts = int(time.time())
+    r = s.post(
+        "https://www.instagram.com/accounts/login/ajax/",
+        data={
+            "username": IG_USERNAME,
+            "enc_password": f"#PWD_INSTAGRAM_BROWSER:0:{ts}:{IG_PASSWORD}",
+            "queryParams": "{}",
+            "optIntoOneTap": "false",
+        },
+        timeout=20,
+    )
+    log.info(f"Login HTTP {r.status_code}: {r.text[:150]}")
+    new_session = s.cookies.get("sessionid")
+    if not new_session:
+        raise RuntimeError("Reconnexion echouee (captcha ou challenge) — intervention manuelle requise")
+    save_session_id(new_session)
+    return new_session
+
+def make_ig_session(session_id: Optional[str] = None) -> requests.Session:
+    if session_id is None:
+        session_id = get_stored_session_id()
     s = requests.Session()
     s.proxies = {"http": IG_PROXY, "https": IG_PROXY}
     s.headers.update({
@@ -35,12 +85,10 @@ def make_ig_session():
     try:
         r = s.get("https://i.instagram.com/api/v1/accounts/current_user/?edit=true", timeout=10)
         if r.status_code in (401, 403):
-            raise RuntimeError(f"SESSION INSTAGRAM EXPIREE (HTTP {r.status_code}) — renouveler le sessionid dans les secrets GitHub")
+            return None  # Signal expiration
         csrf = s.cookies.get("csrftoken", domain=".instagram.com") or "missing"
         s.headers.update({"X-CSRFToken": csrf})
-        log.info(f"CSRF: {csrf[:10]}...")
-    except RuntimeError:
-        raise
+        log.info(f"Session OK. CSRF: {csrf[:10]}...")
     except Exception as e:
         log.warning(f"CSRF fetch failed: {e}")
         s.headers.update({"X-CSRFToken": "Rp0UvLbRuIGCOpqx4loSNfPiO0P0ZECm"})
@@ -68,7 +116,7 @@ def get_followers(user_pk: str, ig_session: requests.Session, amount: int = 200)
         url = f"https://i.instagram.com/api/v1/friendships/{user_pk}/followers/?count=50&max_id={max_id}"
         r = ig_session.get(url, timeout=15)
         if r.status_code in (401, 403):
-            raise RuntimeError(f"SESSION INSTAGRAM EXPIREE sur /followers (HTTP {r.status_code}) — renouveler le sessionid dans les secrets GitHub")
+            return None  # Signal expiration
         if r.status_code != 200:
             log.warning(f"Followers {r.status_code}: {r.text[:100]}")
             break
@@ -120,6 +168,12 @@ def poll_followers():
         return
 
     ig_session = make_ig_session()
+    if ig_session is None:
+        log.warning("Session expiree, reconnexion...")
+        new_sid = relogin()
+        ig_session = make_ig_session(new_sid)
+        if ig_session is None:
+            raise RuntimeError("SESSION INSTAGRAM INVALIDE meme apres reconnexion — intervention manuelle requise")
 
     for rule in rules:
         ig_user_id  = rule['ig_user_id']
@@ -141,6 +195,9 @@ def _process_account(ig_session: requests.Session, ig_user_id: str, rule: dict, 
     time.sleep(random.uniform(2, 4))
 
     current_ids = get_followers(IG_USER_PK, ig_session, amount=200)
+    if current_ids is None:
+        raise RuntimeError("SESSION INSTAGRAM EXPIREE sur /followers — reconnexion echouee")
+
     log.info(f"  {len(current_ids)} followers recents")
 
     known_rows = supabase.table('known_followers').select('follower_id').eq('ig_user_id', ig_user_id).execute().data
