@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def notify(title: str, message: str, priority: str = "high"):
     if not NTFY_TOPIC:
@@ -68,9 +68,12 @@ def get_stored_session_id() -> str:
     return unquote(IG_SESSION_ID)
 
 def save_session_id(session_id: str):
+    # FIX 1: upsert sur ig_user_id (PK) et non ig_username (pas de contrainte unique)
     supabase.table('ig_accounts').upsert(
-        {'ig_username': IG_USERNAME, 'session_id': session_id, 'session_renewed_at': datetime.now(timezone.utc).isoformat()},
-        on_conflict='ig_username'
+        {'ig_user_id': IG_USER_PK, 'ig_username': IG_USERNAME,
+         'session_id': session_id,
+         'session_renewed_at': datetime.now(timezone.utc).isoformat()},
+        on_conflict='ig_user_id'
     ).execute()
     log.info("Nouveau sessionid sauvegarde.")
 
@@ -87,12 +90,14 @@ def relogin() -> str:
     log.info("Reconnexion avec mot de passe...")
     s = requests.Session()
     s.proxies = {"http": IG_PROXY, "https": IG_PROXY}
-    s.headers.update({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15", "X-IG-App-ID": "936619743392459"})
+    s.headers.update({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+                       "X-IG-App-ID": "936619743392459"})
     r = s.get("https://www.instagram.com/", timeout=15)
     csrf = s.cookies.get("csrftoken") or ""
     s.headers.update({"X-CSRFToken": csrf, "Referer": "https://www.instagram.com/"})
     r = s.post("https://www.instagram.com/accounts/login/ajax/",
-               data={"username": IG_USERNAME, "enc_password": f"#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{IG_PASSWORD}",
+               data={"username": IG_USERNAME,
+                     "enc_password": f"#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{IG_PASSWORD}",
                      "queryParams": "{}", "optIntoOneTap": "false"}, timeout=20)
     new_session = s.cookies.get("sessionid")
     if not new_session:
@@ -122,7 +127,6 @@ def make_ig_session(session_id: Optional[str] = None) -> Optional[requests.Sessi
         r = s.get("https://i.instagram.com/api/v1/accounts/current_user/?edit=true", timeout=10)
         if r.status_code in (401, 403):
             return None
-        # FIX 1: fallback CSRF si cookie absent
         csrf = s.cookies.get("csrftoken", domain=".instagram.com") or CSRF_FALLBACK
         s.headers.update({"X-CSRFToken": csrf})
         log.info(f"Session OK. CSRF: {csrf[:10]}...")
@@ -277,7 +281,6 @@ def poll_followers():
         urgent      = get_urgent_mode(ig_user_id)
         max_per_run = 15 if urgent else 8
 
-        # FIX 2: utiliser MAX_DMS_PER_DAY constant
         if get_dm_count(ig_user_id) >= MAX_DMS_PER_DAY:
             log.info("Limite journaliere atteinte.")
             continue
@@ -302,15 +305,21 @@ def _process_account(ig_session, ig_user_id, rule, initialized, inbox_followers,
         supabase.table('follow_dm_rules').update({'initialized': True}).eq('ig_user_id', ig_user_id).execute()
         return
 
+    inbox_set     = set(inbox_followers)
     new_followers = [fid for fid in inbox_followers if fid not in known_map]
-    pending       = [fid for fid in inbox_followers if known_map.get(fid) is False]
-    to_dm         = new_followers + pending
+    pending_inbox = [fid for fid in inbox_followers if known_map.get(fid) is False]
+
+    # FIX 2: récupérer aussi les pending en DB qui ne sont plus dans l'inbox
+    pending_db = [row['follower_id'] for row in known_rows
+                  if row['dm_sent'] is False and row['follower_id'] not in inbox_set]
+
+    to_dm = new_followers + pending_inbox + pending_db
 
     if not to_dm:
         log.info("Aucun nouveau follower.")
         return
 
-    log.info(f"{len(new_followers)} nouveau(x) + {len(pending)} en attente")
+    log.info(f"{len(new_followers)} nouveau(x) + {len(pending_inbox)+len(pending_db)} en attente ({len(pending_db)} hors inbox)")
     remaining = MAX_DMS_PER_DAY - get_dm_count(ig_user_id)
     batch     = to_dm[:min(max_per_run, remaining)]
 
@@ -342,9 +351,9 @@ def _process_account(ig_session, ig_user_id, rule, initialized, inbox_followers,
 
         time.sleep(random.uniform(30, 90))
 
-    new_in_batch = set(f for f in batch if f in set(new_followers))
+    batch_set = set(batch)
     for fid in new_followers:
-        if fid not in new_in_batch:
+        if fid not in batch_set:
             supabase.table('known_followers').upsert(
                 {'ig_user_id': ig_user_id, 'follower_id': fid, 'dm_sent': False},
                 on_conflict='ig_user_id,follower_id'
@@ -352,7 +361,6 @@ def _process_account(ig_session, ig_user_id, rule, initialized, inbox_followers,
 
 def _process_followups(ig_session, ig_user_id, rule):
     """Envoie un message de relance 24h apres si pas de reponse."""
-    # Pas de relance si limite journaliere atteinte
     if get_dm_count(ig_user_id) >= MAX_DMS_PER_DAY:
         return
 
@@ -392,7 +400,6 @@ def _process_followups(ig_session, ig_user_id, rule):
         prenom    = extract_prenom(user_info)
         message   = inject_prenom(followup_msg, prenom)
 
-        # FIX 3: compter les relances dans la limite journaliere
         sent, _ = send_dm(ig_session, follower_id, message)
         if sent:
             increment_dm_count(ig_user_id)
