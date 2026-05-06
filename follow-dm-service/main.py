@@ -14,7 +14,7 @@ IG_USER_PK    = "77135226942"
 NTFY_TOPIC    = os.environ.get('NTFY_TOPIC', '')
 
 MAX_DMS_PER_RUN = 8
-MAX_DMS_PER_DAY = 50
+MAX_DMS_PER_DAY = 120
 DM_DELAY_MIN    = 30
 DM_DELAY_MAX    = 90
 
@@ -173,11 +173,6 @@ def pick_message(rule: dict) -> str:
     return rule.get('dm_message', '')
 
 def poll_followers():
-    # Pause le dimanche
-    if datetime.now().weekday() == 6:
-        log.info("Dimanche — pause hebdomadaire.")
-        return
-
     # Sleep aleatoire 0-10min pour casser le pattern horaire fixe
     sleep_s = random.randint(0, 600)
     log.info(f"Demarrage dans {sleep_s}s...")
