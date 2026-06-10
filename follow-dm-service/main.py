@@ -9,25 +9,21 @@ SUPABASE_URL  = os.environ['SUPABASE_URL']
 SUPABASE_KEY  = os.environ['SUPABASE_KEY']
 IG_USERNAME   = os.environ['IG_USERNAME']
 IG_SESSION_ID = os.environ.get('IG_SESSION_ID', '')
-IG_PASSWORD   = os.environ.get('IG_PASSWORD', '')
 IG_PROXY      = "http://kyrqpksw-fr-4:swonu50mkyce@p.webshare.io:80"
 IG_USER_PK    = "77135226942"
 NTFY_TOPIC    = os.environ.get('NTFY_TOPIC', '')
 
-MAX_DMS_PER_DAY      = 120
-DM_START_HOUR        = 7
-DM_END_HOUR          = 23
-SESSION_RENEWAL_DAYS = 90
-VIP_THRESHOLD        = 5000
-PARIS_TZ             = pytz.timezone('Europe/Paris')
-CSRF_FALLBACK        = "Rp0UvLbRuIGCOpqx4loSNfPiO0P0ZECm"
+MAX_DMS_PER_DAY = 120
+DM_START_HOUR   = 7
+DM_END_HOUR     = 23
+VIP_THRESHOLD   = 5000
+PARIS_TZ        = pytz.timezone('Europe/Paris')
+CSRF_FALLBACK   = "Rp0UvLbRuIGCOpqx4loSNfPiO0P0ZECm"
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', datefmt='%H:%M:%S')
 log = logging.getLogger(__name__)
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def notify(title: str, message: str, priority: str = "high"):
     if not NTFY_TOPIC:
@@ -59,64 +55,14 @@ def increment_dm_count(ig_user_id: str):
     count = get_dm_count(ig_user_id) + 1
     supabase.table('follow_dm_rules').update({'dm_count_today': count, 'dm_count_date': str(date.today())}).eq('ig_user_id', ig_user_id).execute()
 
-# ── Session ───────────────────────────────────────────────────────────────────
-
 def get_stored_session_id() -> str:
     row = supabase.table('ig_accounts').select('session_id').eq('ig_username', IG_USERNAME).maybe_single().execute()
     if row.data and row.data.get('session_id'):
         return row.data['session_id']
     return unquote(IG_SESSION_ID)
 
-def save_session_id(session_id: str):
-    supabase.table('ig_accounts').upsert(
-        {'ig_user_id': IG_USER_PK, 'ig_username': IG_USERNAME,
-         'session_id': session_id,
-         'session_renewed_at': datetime.now(timezone.utc).isoformat()},
-        on_conflict='ig_user_id'
-    ).execute()
-    log.info("Nouveau sessionid sauvegarde.")
-
-def should_renew_session() -> bool:
-    row = supabase.table('ig_accounts').select('session_renewed_at').eq('ig_username', IG_USERNAME).maybe_single().execute()
-    if not row.data or not row.data.get('session_renewed_at'):
-        return True
-    renewed = datetime.fromisoformat(str(row.data['session_renewed_at']).replace('Z', '+00:00'))
-    return (datetime.now(timezone.utc) - renewed).days >= SESSION_RENEWAL_DAYS
-
-def relogin() -> Optional[str]:
-    if not IG_PASSWORD:
-        return None
-    log.info("Tentative de reconnexion automatique...")
-    s = requests.Session()
-    s.proxies = {"http": IG_PROXY, "https": IG_PROXY}
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-        "X-IG-App-ID": "936619743392459"
-    })
-    try:
-        r = s.get("https://www.instagram.com/", timeout=15)
-        csrf = s.cookies.get("csrftoken") or ""
-        s.headers.update({"X-CSRFToken": csrf, "Referer": "https://www.instagram.com/"})
-        r = s.post("https://www.instagram.com/accounts/login/ajax/",
-                   data={"username": IG_USERNAME,
-                         "enc_password": f"#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{IG_PASSWORD}",
-                         "queryParams": "{}", "optIntoOneTap": "false"}, timeout=20)
-        new_session = s.cookies.get("sessionid")
-        if new_session:
-            save_session_id(new_session)
-            return new_session
-    except Exception as e:
-        log.warning(f"Reconnexion auto echouee: {e}")
-    return None
-
-def make_ig_session(session_id: Optional[str] = None) -> Optional[requests.Session]:
-    if session_id is None:
-        if should_renew_session():
-            log.info("Rotation sessionid (90j ecoules) — tentative auto...")
-            renewed = relogin()
-            session_id = renewed if renewed else get_stored_session_id()
-        else:
-            session_id = get_stored_session_id()
+def make_ig_session() -> Optional[requests.Session]:
+    session_id = get_stored_session_id()
     s = requests.Session()
     s.proxies = {"http": IG_PROXY, "https": IG_PROXY}
     s.headers.update({
@@ -135,8 +81,6 @@ def make_ig_session(session_id: Optional[str] = None) -> Optional[requests.Sessi
         log.warning(f"CSRF fetch failed: {e}")
         s.headers.update({"X-CSRFToken": CSRF_FALLBACK})
     return s
-
-# ── Instagram API ─────────────────────────────────────────────────────────────
 
 def get_user_info(ig_session: requests.Session, user_id: str) -> dict:
     try:
@@ -193,7 +137,7 @@ def add_utm(message: str, index: int) -> str:
 def inject_prenom(message: str, prenom: str) -> str:
     if not prenom:
         return message
-    return message.replace("Salam aleykoum ☀️", f"Salam aleykoum {prenom} ☀️", 1)
+    return message.replace("Salam aleykoum ", f"Salam aleykoum {prenom} ", 1)
 
 def send_dm(ig_session: requests.Session, follower_id: str, message: str) -> tuple:
     urls = re.findall(r"https?://[^\s]+", message)
@@ -236,11 +180,9 @@ def pick_followup_message(rule: dict) -> str:
         return ''
     return random.choice(messages)
 
-# ── Main logic ────────────────────────────────────────────────────────────────
-
 def poll_followers():
     if is_sleep_time():
-        log.info(f"Heure de pause ({paris_hour()}h Paris) — aucun DM entre {DM_END_HOUR}h et {DM_START_HOUR}h.")
+        log.info(f"Heure de pause ({paris_hour()}h Paris).")
         return
 
     sleep_s = random.randint(0, 600)
@@ -253,25 +195,18 @@ def poll_followers():
         return
 
     ig_session = make_ig_session()
-
     if ig_session is None:
-        log.warning("Session expiree, tentative de reconnexion...")
-        renewed = relogin()
-        if renewed:
-            ig_session = make_ig_session(renewed)
-
-    if ig_session is None:
-        msg = "Session Instagram expiree. Lance refresh_session_auto.py sur ton PC pour la renouveler (pas besoin de F12)."
+        msg = "Session Instagram expiree. Reconnecte-toi manuellement a Instagram dans Chrome, puis lance refresh_session_auto.py."
         log.warning(msg)
         notify("Bot Instagram en pause", msg, "urgent")
         return
 
     if check_shadowban(ig_session):
-        notify("Shadowban detecte", "Verifier ton compte Instagram — restrictions detectees.", "high")
+        notify("Shadowban detecte", "Verifier ton compte Instagram.", "high")
 
     inbox_followers = get_new_followers_from_inbox(ig_session)
     if inbox_followers is None:
-        msg = "Session expiree sur /news/inbox. Lance refresh_session_auto.py sur ton PC."
+        msg = "Session expiree. Reconnecte-toi a Instagram dans Chrome puis lance refresh_session_auto.py."
         log.warning(msg)
         notify("Bot Instagram en pause", msg, "urgent")
         return
@@ -289,8 +224,6 @@ def poll_followers():
         try:
             _process_account(ig_session, ig_user_id, rule, initialized, inbox_followers, max_per_run)
             _process_followups(ig_session, ig_user_id, rule)
-        except RuntimeError:
-            raise
         except Exception as e:
             log.error(f"Erreur : {e}", exc_info=True)
 
@@ -318,7 +251,7 @@ def _process_account(ig_session, ig_user_id, rule, initialized, inbox_followers,
         log.info("Aucun nouveau follower.")
         return
 
-    log.info(f"{len(new_followers)} nouveau(x) + {len(pending_inbox)+len(pending_db)} en attente ({len(pending_db)} hors inbox)")
+    log.info(f"{len(new_followers)} nouveau(x) + {len(pending_inbox)+len(pending_db)} en attente")
     remaining = MAX_DMS_PER_DAY - get_dm_count(ig_user_id)
     batch     = to_dm[:min(max_per_run, remaining)]
 
@@ -389,7 +322,6 @@ def _process_followups(ig_session, ig_user_id, rule):
         thread_id   = row['thread_id']
 
         if has_reply_in_thread(ig_session, thread_id):
-            log.info(f"Reponse existante -> skip relance {follower_id}")
             supabase.table('known_followers').update({'follow_up_sent': True})\
                 .eq('ig_user_id', ig_user_id).eq('follower_id', follower_id).execute()
             continue
@@ -403,7 +335,6 @@ def _process_followups(ig_session, ig_user_id, rule):
             increment_dm_count(ig_user_id)
         supabase.table('known_followers').update({'follow_up_sent': True})\
             .eq('ig_user_id', ig_user_id).eq('follower_id', follower_id).execute()
-        log.info(f"Relance {'OK' if sent else 'KO'} -> {follower_id}")
         time.sleep(random.uniform(30, 90))
 
 if __name__ == '__main__':
