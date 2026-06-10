@@ -17,7 +17,7 @@ NTFY_TOPIC    = os.environ.get('NTFY_TOPIC', '')
 MAX_DMS_PER_DAY      = 120
 DM_START_HOUR        = 7
 DM_END_HOUR          = 23
-SESSION_RENEWAL_DAYS = 30
+SESSION_RENEWAL_DAYS = 90
 VIP_THRESHOLD        = 5000
 PARIS_TZ             = pytz.timezone('Europe/Paris')
 CSRF_FALLBACK        = "Rp0UvLbRuIGCOpqx4loSNfPiO0P0ZECm"
@@ -68,7 +68,6 @@ def get_stored_session_id() -> str:
     return unquote(IG_SESSION_ID)
 
 def save_session_id(session_id: str):
-    # FIX 1: upsert sur ig_user_id (PK) et non ig_username (pas de contrainte unique)
     supabase.table('ig_accounts').upsert(
         {'ig_user_id': IG_USER_PK, 'ig_username': IG_USERNAME,
          'session_id': session_id,
@@ -84,36 +83,38 @@ def should_renew_session() -> bool:
     renewed = datetime.fromisoformat(str(row.data['session_renewed_at']).replace('Z', '+00:00'))
     return (datetime.now(timezone.utc) - renewed).days >= SESSION_RENEWAL_DAYS
 
-def relogin() -> str:
+def relogin() -> Optional[str]:
     if not IG_PASSWORD:
-        raise RuntimeError("SESSION EXPIREE et IG_PASSWORD non defini")
-    log.info("Reconnexion avec mot de passe...")
+        return None
+    log.info("Tentative de reconnexion automatique...")
     s = requests.Session()
     s.proxies = {"http": IG_PROXY, "https": IG_PROXY}
-    s.headers.update({"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-                       "X-IG-App-ID": "936619743392459"})
-    r = s.get("https://www.instagram.com/", timeout=15)
-    csrf = s.cookies.get("csrftoken") or ""
-    s.headers.update({"X-CSRFToken": csrf, "Referer": "https://www.instagram.com/"})
-    r = s.post("https://www.instagram.com/accounts/login/ajax/",
-               data={"username": IG_USERNAME,
-                     "enc_password": f"#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{IG_PASSWORD}",
-                     "queryParams": "{}", "optIntoOneTap": "false"}, timeout=20)
-    new_session = s.cookies.get("sessionid")
-    if not new_session:
-        raise RuntimeError("Reconnexion echouee — captcha requis")
-    save_session_id(new_session)
-    return new_session
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+        "X-IG-App-ID": "936619743392459"
+    })
+    try:
+        r = s.get("https://www.instagram.com/", timeout=15)
+        csrf = s.cookies.get("csrftoken") or ""
+        s.headers.update({"X-CSRFToken": csrf, "Referer": "https://www.instagram.com/"})
+        r = s.post("https://www.instagram.com/accounts/login/ajax/",
+                   data={"username": IG_USERNAME,
+                         "enc_password": f"#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{IG_PASSWORD}",
+                         "queryParams": "{}", "optIntoOneTap": "false"}, timeout=20)
+        new_session = s.cookies.get("sessionid")
+        if new_session:
+            save_session_id(new_session)
+            return new_session
+    except Exception as e:
+        log.warning(f"Reconnexion auto echouee: {e}")
+    return None
 
 def make_ig_session(session_id: Optional[str] = None) -> Optional[requests.Session]:
     if session_id is None:
         if should_renew_session():
-            log.info("Rotation sessionid (30j ecoules)...")
-            try:
-                session_id = relogin()
-            except Exception as e:
-                log.warning(f"Rotation echouee: {e} — utilisation session existante")
-                session_id = get_stored_session_id()
+            log.info("Rotation sessionid (90j ecoules) — tentative auto...")
+            renewed = relogin()
+            session_id = renewed if renewed else get_stored_session_id()
         else:
             session_id = get_stored_session_id()
     s = requests.Session()
@@ -195,7 +196,6 @@ def inject_prenom(message: str, prenom: str) -> str:
     return message.replace("Salam aleykoum ☀️", f"Salam aleykoum {prenom} ☀️", 1)
 
 def send_dm(ig_session: requests.Session, follower_id: str, message: str) -> tuple:
-    """Retourne (success: bool, thread_id: str)"""
     urls = re.findall(r"https?://[^\s]+", message)
     client_ctx = str(uuid.uuid4()).replace("-", "")[:20] + str(int(time.time() * 1000))
     if urls:
@@ -224,7 +224,6 @@ def has_reply_in_thread(ig_session: requests.Session, thread_id: str) -> bool:
     return False
 
 def pick_message(rule: dict) -> tuple:
-    """Retourne (message: str, index: int)"""
     messages = rule.get('dm_messages') or []
     if not messages:
         return rule.get('dm_message', ''), 0
@@ -254,26 +253,28 @@ def poll_followers():
         return
 
     ig_session = make_ig_session()
+
     if ig_session is None:
-        log.warning("Session expiree, reconnexion...")
-        try:
-            ig_session = make_ig_session(relogin())
-        except RuntimeError as e:
-            notify("Bot Instagram ARRETE", str(e), "urgent")
-            raise
-        if ig_session is None:
-            msg = "SESSION INVALIDE meme apres reconnexion"
-            notify("Bot Instagram ARRETE", msg, "urgent")
-            raise RuntimeError(msg)
+        log.warning("Session expiree, tentative de reconnexion...")
+        renewed = relogin()
+        if renewed:
+            ig_session = make_ig_session(renewed)
+
+    if ig_session is None:
+        msg = "Session Instagram expiree. Lance refresh_session_auto.py sur ton PC pour la renouveler (pas besoin de F12)."
+        log.warning(msg)
+        notify("Bot Instagram en pause", msg, "urgent")
+        return
 
     if check_shadowban(ig_session):
         notify("Shadowban detecte", "Verifier ton compte Instagram — restrictions detectees.", "high")
 
     inbox_followers = get_new_followers_from_inbox(ig_session)
     if inbox_followers is None:
-        msg = "SESSION EXPIREE sur /news/inbox"
-        notify("Bot Instagram ARRETE", msg, "urgent")
-        raise RuntimeError(msg)
+        msg = "Session expiree sur /news/inbox. Lance refresh_session_auto.py sur ton PC."
+        log.warning(msg)
+        notify("Bot Instagram en pause", msg, "urgent")
+        return
 
     for rule in rules:
         ig_user_id  = rule['ig_user_id']
@@ -308,10 +309,8 @@ def _process_account(ig_session, ig_user_id, rule, initialized, inbox_followers,
     inbox_set     = set(inbox_followers)
     new_followers = [fid for fid in inbox_followers if fid not in known_map]
     pending_inbox = [fid for fid in inbox_followers if known_map.get(fid) is False]
-
-    # FIX 2: récupérer aussi les pending en DB qui ne sont plus dans l'inbox
-    pending_db = [row['follower_id'] for row in known_rows
-                  if row['dm_sent'] is False and row['follower_id'] not in inbox_set]
+    pending_db    = [row['follower_id'] for row in known_rows
+                     if row['dm_sent'] is False and row['follower_id'] not in inbox_set]
 
     to_dm = new_followers + pending_inbox + pending_db
 
@@ -360,7 +359,6 @@ def _process_account(ig_session, ig_user_id, rule, initialized, inbox_followers,
             ).execute()
 
 def _process_followups(ig_session, ig_user_id, rule):
-    """Envoie un message de relance 24h apres si pas de reponse."""
     if get_dm_count(ig_user_id) >= MAX_DMS_PER_DAY:
         return
 
