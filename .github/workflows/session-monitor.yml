@@ -1,0 +1,76 @@
+name: Session Monitor
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # Tous les jours a 8h UTC = 10h Paris
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check session age and health
+        env:
+          SUPABASE_URL:  ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:  ${{ secrets.SUPABASE_KEY }}
+          IG_USERNAME:   ${{ secrets.IG_USERNAME }}
+          IG_SESSION_ID: ${{ secrets.IG_SESSION_ID }}
+          NTFY_TOPIC:    ${{ secrets.NTFY_TOPIC }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, datetime, os, requests
+
+          ntfy = os.environ.get("NTFY_TOPIC", "")
+          sid  = os.environ.get("IG_SESSION_ID", "")
+
+          def notify(title, msg, priority="high"):
+              if not ntfy:
+                  return
+              requests.post(f"https://ntfy.sh/{ntfy}", data=msg.encode(),
+                            headers={"Title": title, "Priority": priority, "Tags": "warning"}, timeout=10)
+
+          # 1. Verifier age de la session
+          try:
+              with open("session_metadata.json") as f:
+                  meta = json.load(f)
+              set_at = datetime.datetime.fromisoformat(meta["session_set_at"].replace("Z", "+00:00"))
+              age = (datetime.datetime.now(datetime.timezone.utc) - set_at).days
+              print(f"Age session : {age} jours")
+          except Exception as e:
+              print(f"Impossible de lire session_metadata.json : {e}")
+              age = 999
+
+          # 2. Verifier si session est vivante
+          alive = False
+          try:
+              proxy = "http://kyrqpksw-fr-4:swonu50mkyce@p.webshare.io:80"
+              r = requests.get(
+                  "https://i.instagram.com/api/v1/accounts/current_user/?edit=true",
+                  cookies={"sessionid": requests.utils.unquote(sid)},
+                  proxies={"http": proxy, "https": proxy},
+                  headers={
+                      "User-Agent": "Instagram 269.0.0.18.75 Android (28/9; 380dpi; 1080x2220; OnePlus; 6T Dev; OnePlus6T; qcom; fr_FR; 314665256)",
+                      "X-IG-App-ID": "936619743392459",
+                  },
+                  timeout=15
+              )
+              alive = r.status_code == 200
+              print(f"Session Instagram : {'OK' if alive else 'MORTE'} (HTTP {r.status_code})")
+          except Exception as e:
+              print(f"Erreur check session : {e}")
+
+          # 3. Alertes
+          if not alive:
+              notify("Bot ARRETE - Session morte",
+                     f"Session Instagram morte apres {age}j. Lance refresh_session_auto.py en ADMIN MAINTENANT.",
+                     "urgent")
+          elif age >= 4:
+              notify("IGBot - Refresh dans 24h",
+                     f"Session a {age} jours. Lance refresh_session_auto.py sur ton PC AUJOURD'HUI pour eviter une coupure.",
+                     "high")
+          else:
+              print(f"Tout OK - session {age}j, vivante.")
+          PYEOF
