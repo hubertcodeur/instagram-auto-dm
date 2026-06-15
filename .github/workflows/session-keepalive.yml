@@ -1,32 +1,26 @@
 name: Session Keepalive
 
 on:
-  schedule:
-    # Toutes les 6h : 02h, 08h, 14h, 20h UTC = 03h, 09h, 15h, 21h Paris (été)
-    - cron: '0 */6 * * *'
   workflow_dispatch:
 
-concurrency:
-  group: ig-bot
-  cancel-in-progress: false
+# Schedule DESACTIVE intentionnellement :
+# Le follow-dm.yml fait deja des appels Instagram toutes les heures (7h-23h Paris).
+# Un keepalive separe avec endpoint fixe toutes les 6h = pattern bot detecte par Instagram.
+# La session est maintenue naturellement par les vrais runs follow-dm.
 
 jobs:
   keepalive:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: follow-dm-service/requirements.txt
-
       - name: Install dependencies
         run: pip install -r follow-dm-service/requirements.txt
-
       - name: Keep session warm
         env:
           SUPABASE_URL:  ${{ secrets.SUPABASE_URL }}
@@ -35,12 +29,7 @@ jobs:
           IG_SESSION_ID: ${{ secrets.IG_SESSION_ID }}
           NTFY_TOPIC:    ${{ secrets.NTFY_TOPIC }}
         run: python follow-dm-service/session_keepalive.py
-
       - name: Notify on failure
         if: failure()
         run: |
-          curl -s -X POST https://ntfy.sh/${{ secrets.NTFY_TOPIC }} \
-            -H "Title: Bot Instagram session pause" \
-            -H "Priority: high" \
-            -H "Tags: warning" \
-            -d "Keepalive a echoue. La session Instagram est probablement expiree. Refresh manuel necessaire."
+          curl -s -X POST https://ntfy.sh/${{ secrets.NTFY_TOPIC }}             -H "Title: Bot Instagram session pause"             -H "Priority: high"             -H "Tags: warning"             -d "Keepalive a echoue. Lance refresh_session_auto.py en admin."
