@@ -2,7 +2,9 @@ name: Session Monitor
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # Tous les jours a 8h UTC = 10h Paris
+    # GitHub cron is UTC. Run at both possible UTC hours and keep only the
+    # execution whose Europe/Paris local hour is exactly 1.
+    - cron: '0 0,23 * * *'
   workflow_dispatch:
 
 jobs:
@@ -22,6 +24,12 @@ jobs:
         run: |
           python3 - <<'PYEOF'
           import json, datetime, os, requests
+          from zoneinfo import ZoneInfo
+
+          paris_now = datetime.datetime.now(ZoneInfo("Europe/Paris"))
+          if paris_now.hour != 1:
+              print(f"Session Monitor ignore a {paris_now:%H:%M} Europe/Paris; fenetre NTFY unique a 1h.")
+              raise SystemExit(0)
 
           ntfy = os.environ.get("NTFY_TOPIC", "")
           sid  = os.environ.get("IG_SESSION_ID", "")

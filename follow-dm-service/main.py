@@ -198,7 +198,6 @@ def poll_followers():
     if ig_session is None:
         msg = "Session Instagram expiree. Reconnecte-toi manuellement a Instagram dans Chrome, puis lance refresh_session_auto.py."
         log.warning(msg)
-        notify("Bot Instagram en pause", msg, "urgent")
         return
 
     if check_shadowban(ig_session):
@@ -208,7 +207,6 @@ def poll_followers():
     if inbox_followers is None:
         msg = "Session expiree. Reconnecte-toi a Instagram dans Chrome puis lance refresh_session_auto.py."
         log.warning(msg)
-        notify("Bot Instagram en pause", msg, "urgent")
         return
 
     for rule in rules:
